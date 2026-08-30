@@ -11,15 +11,19 @@ from hand_utils import create_landmarker, extract_features, draw_hand
 DATA_FILE = Path("data/signs.csv")
 FEATURE_COUNT = 63
 
+
 def append_sample(label, features):
     DATA_FILE.parent.mkdir(exist_ok=True)
-    new_file = not DATA_FILE.exists()
+
+    # Write the CSV header if the file does not exist OR exists but is empty.
+    needs_header = not DATA_FILE.exists() or DATA_FILE.stat().st_size == 0
 
     with DATA_FILE.open("a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        if new_file:
+        if needs_header:
             writer.writerow(["label"] + [f"f{i}" for i in range(FEATURE_COUNT)])
         writer.writerow([label] + list(map(float, features)))
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -106,6 +110,7 @@ def main():
         landmarker.close()
         cap.release()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

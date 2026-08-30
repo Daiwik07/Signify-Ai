@@ -1,13 +1,19 @@
 import csv
+import os
 import random
 import time
 from collections import Counter, deque
 from pathlib import Path
 
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("GLOG_logtostderr", "0")
+
 import cv2
 import joblib
 import mediapipe as mp
 import numpy as np
+import pandas as pd
 
 from hand_utils import HAND_CONNECTIONS, create_landmarker, draw_hand, extract_features
 
@@ -51,7 +57,17 @@ def trained_labels(model):
 
 def predict_hand(model, hand):
     features = extract_features(hand)
-    probabilities = model.predict_proba(features.reshape(1, -1))[0]
+
+    if hasattr(model, "feature_names_in_"):
+        feature_df = pd.DataFrame(
+            [features],
+            columns=model.feature_names_in_,
+            dtype=np.float32,
+        )
+        probabilities = model.predict_proba(feature_df)[0]
+    else:
+        probabilities = model.predict_proba(features.reshape(1, -1))[0]
+
     best = int(np.argmax(probabilities))
     return str(model.classes_[best]), float(probabilities[best]), features
 

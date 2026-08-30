@@ -1,5 +1,11 @@
+import os
 from pathlib import Path
 import urllib.request
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("GLOG_logtostderr", "0")
+
 import numpy as np
 import mediapipe as mp
 

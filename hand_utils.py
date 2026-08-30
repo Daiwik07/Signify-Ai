@@ -1,9 +1,13 @@
 import os
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 import urllib.request
 
+# Reduce TensorFlow Lite / MediaPipe native logging.
+# These must be set before importing MediaPipe.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("GLOG_logtostderr", "0")
 
 import numpy as np
@@ -25,6 +29,58 @@ HAND_CONNECTIONS = [
     (0, 17),
 ]
 
+
+@contextmanager
+def suppress_native_stderr():
+    """
+    Temporarily silence native C/C++ messages written directly to stderr.
+
+    MediaPipe/TensorFlow Lite can print INFO/WARNING messages from native code
+    even when Python logging is disabled. This redirects only stderr while a
+    MediaPipe native call is running. If a real Python exception occurs, the
+    traceback is still shown after stderr is restored.
+    """
+    try:
+        stderr_fd = sys.stderr.fileno()
+        sys.stderr.flush()
+        saved_fd = os.dup(stderr_fd)
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+    except (AttributeError, OSError, ValueError):
+        # Some IDE consoles do not expose a normal stderr file descriptor.
+        yield
+        return
+
+    try:
+        os.dup2(null_fd, stderr_fd)
+        yield
+    finally:
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os.dup2(saved_fd, stderr_fd)
+        os.close(saved_fd)
+        os.close(null_fd)
+
+
+class QuietHandLandmarker:
+    """Small wrapper that keeps MediaPipe's native console noise hidden."""
+
+    def __init__(self, landmarker):
+        self._landmarker = landmarker
+
+    def detect_for_video(self, image, timestamp_ms):
+        with suppress_native_stderr():
+            return self._landmarker.detect_for_video(image, timestamp_ms)
+
+    def close(self):
+        with suppress_native_stderr():
+            return self._landmarker.close()
+
+    def __getattr__(self, name):
+        return getattr(self._landmarker, name)
+
+
 def ensure_hand_model():
     MODEL_DIR.mkdir(exist_ok=True)
     if not HAND_MODEL.exists():
@@ -32,6 +88,7 @@ def ensure_hand_model():
         urllib.request.urlretrieve(HAND_MODEL_URL, HAND_MODEL)
         print("Downloaded:", HAND_MODEL)
     return HAND_MODEL
+
 
 def create_landmarker():
     model_path = ensure_hand_model()
@@ -49,7 +106,13 @@ def create_landmarker():
         min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
-    return HandLandmarker.create_from_options(options)
+
+    # Model creation itself can print XNNPACK / feedback-manager messages.
+    with suppress_native_stderr():
+        landmarker = HandLandmarker.create_from_options(options)
+
+    return QuietHandLandmarker(landmarker)
+
 
 def extract_features(hand_landmarks):
     """
@@ -68,6 +131,7 @@ def extract_features(hand_landmarks):
 
     points = points / scale
     return points.flatten()
+
 
 def draw_hand(frame, hand_landmarks):
     import cv2

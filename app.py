@@ -19,6 +19,7 @@ from hand_utils import HAND_CONNECTIONS, create_landmarker, draw_hand, extract_f
 
 MODEL_FILE = Path("models/sign_classifier.joblib")
 DATA_FILE = Path("data/signs.csv")
+SIGN_IMAGE_DIR = Path("assets/signs")
 
 CONFIDENCE_THRESHOLD = 0.60
 HOLD_FRAMES = 6
@@ -96,9 +97,44 @@ def load_reference_pose(label):
     return np.mean(np.asarray(rows, dtype=np.float32), axis=0).reshape(21, 3)
 
 
+def find_sign_image(label):
+    """Return a local sign photo if one exists for this label."""
+    name = normalize_label(label)
+    for extension in (".png", ".jpg", ".jpeg", ".webp"):
+        path = SIGN_IMAGE_DIR / f"{name}{extension}"
+        if path.exists():
+            return path
+    return None
+
+
 def reference_panel(label, pose, height):
     width = 330
     panel = np.zeros((height, width, 3), dtype=np.uint8)
+
+    image_path = find_sign_image(label)
+    if image_path is not None:
+        photo = cv2.imread(str(image_path))
+        if photo is not None:
+            cv2.putText(panel, "PHOTO GUIDE", (20, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(panel, label.replace("_", " "), (20, 72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+            max_w = width - 30
+            max_h = max(height - 135, 80)
+            ph, pw = photo.shape[:2]
+            scale = min(max_w / pw, max_h / ph)
+            new_w = max(1, int(pw * scale))
+            new_h = max(1, int(ph * scale))
+            resized = cv2.resize(photo, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            x = (width - new_w) // 2
+            y = 90 + max(0, (max_h - new_h) // 2)
+            panel[y:y + new_h, x:x + new_w] = resized
+
+            cv2.putText(panel, "Copy the photo", (20, height - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            return panel
 
     cv2.putText(panel, "REFERENCE", (20, 35),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -106,8 +142,8 @@ def reference_panel(label, pose, height):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
     if pose is None:
-        cv2.putText(panel, "No reference pose", (20, 140),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        cv2.putText(panel, "No photo/reference", (20, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
         return panel
 
     points = pose[:, :2]

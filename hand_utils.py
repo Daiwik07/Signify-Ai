@@ -10,6 +10,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 os.environ.setdefault("GLOG_logtostderr", "0")
 
+import cv2
 import numpy as np
 import mediapipe as mp
 
@@ -28,6 +29,121 @@ HAND_CONNECTIONS = [
     (13, 17), (17, 18), (18, 19), (19, 20),
     (0, 17),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Signify AI visual polish
+# ---------------------------------------------------------------------------
+# app.py and collect_data.py both use the same imported cv2 module. By adding
+# the small wrappers below here, we can make only the Signify AI app windows
+# full-screen and make its UI wording friendlier without changing any model or
+# training behavior.
+_ORIGINAL_IMSHOW = cv2.imshow
+_ORIGINAL_PUT_TEXT = cv2.putText
+_ORIGINAL_DESTROY_ALL_WINDOWS = cv2.destroyAllWindows
+_FULLSCREEN_WINDOWS = set()
+
+
+def _humanize_ui_text(text):
+    """Turn technical UI labels into simple, natural teaching language."""
+    text = str(text)
+
+    exact_replacements = {
+        "PHOTO GUIDE": "How to Make This Sign",
+        "Copy the photo": "Try to copy this hand shape",
+        "REFERENCE": "Practice Guide",
+        "Copy this hand shape": "Match your hand to this guide",
+        "Movement detected": "Nice - I can see the movement",
+        "Hand mostly still": "Hold your hand naturally",
+        "CORRECT! +1": "Correct! Well done!",
+        "CORRECT! Great job!": "That's right! Great job!",
+        "SIGNIFY AI - IDENTIFIER": "Signify AI - Live Sign Reader",
+        "SPACE=add   C=clear   Q=return": "SPACE: add sign   C: clear   Q: back",
+    }
+
+    if text in exact_replacements:
+        return exact_replacements[text]
+
+    if text.startswith("Learn: "):
+        return "Let's learn: " + text[len("Learn: "):]
+
+    if text.startswith("AI sees: "):
+        return "I can see: " + text[len("AI sees: "):]
+
+    if text.startswith("Pose similarity: "):
+        value = text[len("Pose similarity: "):]
+        try:
+            percent = float(value.rstrip("%"))
+        except ValueError:
+            return "Your match: " + value
+
+        if percent >= 90:
+            return f"Excellent match: {percent:.0f}%"
+        if percent >= 75:
+            return f"Great, almost there: {percent:.0f}%"
+        if percent >= 55:
+            return f"Good try, adjust a little: {percent:.0f}%"
+        return f"Keep going, your match is {percent:.0f}%"
+
+    if text.startswith("MAKE: "):
+        return "Show me: " + text[len("MAKE: "):]
+
+    if text.startswith("Time: "):
+        return "Time left: " + text[len("Time: "):]
+
+    # Identifier uses "Sign: X". collect_data.py uses
+    # "Sign: X   Samples: ...", so leave the data-collection screen unchanged.
+    if text.startswith("Sign: ") and "Samples:" not in text:
+        return "I can see: " + text[len("Sign: "):]
+
+    if text.startswith("Confidence: "):
+        return "I'm " + text[len("Confidence: "):] + " sure"
+
+    if text.startswith("Sequence: "):
+        return "Your signs: " + text[len("Sequence: "):]
+
+    return text
+
+
+def _signify_put_text(image, text, *args, **kwargs):
+    return _ORIGINAL_PUT_TEXT(
+        image,
+        _humanize_ui_text(text),
+        *args,
+        **kwargs,
+    )
+
+
+def _signify_imshow(window_name, image):
+    """Open Signify AI webcam screens in full-screen mode."""
+    name = str(window_name)
+
+    if name.startswith("Signify AI") and name not in _FULLSCREEN_WINDOWS:
+        try:
+            cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty(
+                name,
+                cv2.WND_PROP_FULLSCREEN,
+                cv2.WINDOW_FULLSCREEN,
+            )
+            _FULLSCREEN_WINDOWS.add(name)
+        except cv2.error:
+            # If a platform does not support OpenCV full-screen, keep the app
+            # usable in a normal window rather than crashing.
+            pass
+
+    return _ORIGINAL_IMSHOW(window_name, image)
+
+
+def _signify_destroy_all_windows():
+    _FULLSCREEN_WINDOWS.clear()
+    return _ORIGINAL_DESTROY_ALL_WINDOWS()
+
+
+# Apply the UI helpers to the shared OpenCV module.
+cv2.putText = _signify_put_text
+cv2.imshow = _signify_imshow
+cv2.destroyAllWindows = _signify_destroy_all_windows
 
 
 @contextmanager
@@ -134,8 +250,6 @@ def extract_features(hand_landmarks):
 
 
 def draw_hand(frame, hand_landmarks):
-    import cv2
-
     h, w = frame.shape[:2]
     pts = [(int(lm.x * w), int(lm.y * h)) for lm in hand_landmarks]
 

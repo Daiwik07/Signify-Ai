@@ -1,97 +1,99 @@
-# AI Sign Language Helper (Python)
+# Signify AI
 
-A beginner-friendly AI project that learns hand signs from your webcam and recognizes them in real time.
+Signify AI is a real-time hand-sign recognition project built with Python, OpenCV, MediaPipe, and a Random Forest classifier.
 
-## What it uses
+It can:
 
-- Python
-- OpenCV for the webcam
-- MediaPipe Hand Landmarker for 21 hand landmarks
-- scikit-learn Random Forest for sign classification
+- Learn and practice trained hand signs
+- Show a reference image while learning
+- Test the user with trained signs
+- Identify signs live through the webcam
+- Show confidence and pose similarity
+- Run in full-screen mode for presentation/demo
 
-## Important
+## Required Files for Competition Submission
 
-This starter project recognizes **static hand signs that you train yourself**.
-Real sign languages also use motion, two hands, facial expressions, body position, and grammar.
-So do not claim that this starter version translates an entire sign language.
-
-## 1. Install
-
-Recommended: Python 3.11.
-
-```bash
-python -m venv .venv
+```text
+Signify-Ai/
+│
+├── app.py
+├── hand_utils.py
+├── requirements.txt
+│
+├── assets/
+│   └── signs/
+│       ├── A.png
+│       ├── B.png
+│       ├── C.png
+│       └── ...
+│
+├── data/
+│   └── signs.csv
+│
+└── models/
+    ├── sign_classifier.joblib
+    └── hand_landmarker.task
 ```
 
-Windows:
+### What each file does
 
-```bash
-.venv\Scripts\activate
-```
+- `app.py` — main Signify AI application
+- `hand_utils.py` — hand detection, landmark extraction, and drawing functions
+- `requirements.txt` — Python packages needed to run the project
+- `assets/signs/` — reference sign images used in Learn mode
+- `data/signs.csv` — collected landmark data used for reference poses and similarity
+- `models/sign_classifier.joblib` — trained sign-classification model
+- `models/hand_landmarker.task` — MediaPipe hand landmark model
 
-Install packages:
+`collect_data.py` and `train_model.py` are development/training files and are not required just to run the finished competition demo.
+
+## Requirements
+
+Recommended Python version: **Python 3.11**
+
+Install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-The MediaPipe hand model downloads automatically the first time you run the program.
-
-## 2. Collect training examples
-
-Collect around 250 samples for each sign.
-
-Example:
-
-```bash
-python collect_data.py HELLO
-python collect_data.py YES
-python collect_data.py NO
-python collect_data.py THANK_YOU
-```
-
-When the webcam opens:
-
-- Press `C` to start collecting.
-- Keep making the same sign.
-- Move the hand slightly closer/farther and rotate it a little.
-- Press `C` again if you want to pause.
-- Press `Q` to quit.
-
-For better accuracy, record the sign under different lighting and backgrounds.
-
-## 3. Train the AI
-
-```bash
-python train_model.py
-```
-
-The trained classifier is saved to:
-
-```text
-models/sign_classifier.joblib
-```
-
-## 4. Run the helper
+## Run the Project
 
 ```bash
 python app.py
 ```
 
-Show one of the trained signs to the webcam.
+The main menu provides:
 
-Press `Q` to exit.
+```text
+1. Learn Sign Language
+2. Take a Test
+3. Identify a Sign
+Q. Exit
+```
 
-## Good school-demo features to add next
+## How It Works
 
-1. Learning mode: show a word and ask the user to make the correct sign.
-2. Score system: +10 points for a correct sign.
-3. Text-to-speech: speak the recognized word.
-4. Sentence builder: save recognized signs as words.
-5. Two-hand recognition.
-6. Dynamic-sign recognition using a short sequence of frames and an LSTM/Transformer.
-7. Indian Sign Language dataset and ISL-specific labels.
+The webcam image is processed by MediaPipe, which detects 21 hand landmarks. These landmarks are converted into 63 normalized values and passed to the trained Random Forest model to recognize the sign.
 
-## Suggested presentation line
+```text
+Webcam
+   ↓
+MediaPipe Hand Detection
+   ↓
+21 Hand Landmarks
+   ↓
+63 Normalized Features
+   ↓
+Random Forest Classifier
+   ↓
+Recognized Sign
+```
 
-> Our AI does not try to replace sign-language interpreters. It demonstrates how computer vision can make sign-language learning and basic communication more accessible by recognizing trained hand signs in real time.
+## Note
+
+Signify AI currently focuses mainly on trained hand shapes. Complete sign languages can also depend on movement, two hands, facial expressions, body position, and grammar.
+
+## Project Goal
+
+The goal of Signify AI is to demonstrate how computer vision and machine learning can make learning and recognizing hand signs more interactive and accessible.

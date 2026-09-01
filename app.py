@@ -26,8 +26,28 @@ HOLD_FRAMES = 6
 WAVE_MOTION_THRESHOLD = 0.015
 
 
+# -----------------------------
+# Small helpers
+# -----------------------------
+
 def normalize_label(text):
     return "_".join(text.strip().upper().replace("-", " ").split())
+
+
+def pretty_label(text):
+    return str(text).replace("_", " ")
+
+
+def open_fullscreen(window_name):
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    try:
+        cv2.setWindowProperty(
+            window_name,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN,
+        )
+    except cv2.error:
+        pass
 
 
 def smooth_prediction(history):
@@ -39,39 +59,57 @@ def smooth_prediction(history):
 def wrist_motion_score(wrist_history):
     if len(wrist_history) < 2:
         return 0.0
-    points = np.array(wrist_history, dtype=np.float32)
-    deltas = np.linalg.norm(np.diff(points, axis=0), axis=1)
-    return float(np.mean(deltas))
+
+    points = np.asarray(wrist_history, dtype=np.float32)
+    movement = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    return float(np.mean(movement))
 
 
 def load_model():
     if not MODEL_FILE.exists():
         print("\nTrained model not found.")
-        print("Collect at least two signs and then run: python train_model.py")
+        print("Collect at least two signs and run: python train_model.py")
         return None
+
     return joblib.load(MODEL_FILE)
 
 
 def trained_labels(model):
-    return {normalize_label(str(x)): str(x) for x in model.classes_}
+    return {
+        normalize_label(str(label)): str(label)
+        for label in model.classes_
+    }
 
 
 def predict_hand(model, hand):
     features = extract_features(hand)
 
     if hasattr(model, "feature_names_in_"):
-        feature_df = pd.DataFrame(
+        sample = pd.DataFrame(
             [features],
             columns=model.feature_names_in_,
             dtype=np.float32,
         )
-        probabilities = model.predict_proba(feature_df)[0]
+        probabilities = model.predict_proba(sample)[0]
     else:
         probabilities = model.predict_proba(features.reshape(1, -1))[0]
 
-    best = int(np.argmax(probabilities))
-    return str(model.classes_[best]), float(probabilities[best]), features
+    best_index = int(np.argmax(probabilities))
+    label = str(model.classes_[best_index])
+    confidence = float(probabilities[best_index])
 
+    return label, confidence, features
+
+
+def detect_hand(landmarker, frame):
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    return landmarker.detect_for_video(image, int(time.monotonic() * 1000))
+
+
+# -----------------------------
+# Learn mode helpers
+# -----------------------------
 
 def load_reference_pose(label):
     if not DATA_FILE.exists():
@@ -79,114 +117,216 @@ def load_reference_pose(label):
 
     wanted = normalize_label(label)
     rows = []
-    fields = [f"f{i}" for i in range(63)]
+    feature_names = [f"f{i}" for i in range(63)]
 
-    with DATA_FILE.open("r", newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+    with DATA_FILE.open("r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+
         for row in reader:
             if normalize_label(row.get("label", "")) != wanted:
                 continue
+
             try:
-                rows.append([float(row[name]) for name in fields])
+                rows.append([float(row[name]) for name in feature_names])
             except (KeyError, TypeError, ValueError):
-                pass
+                continue
 
     if not rows:
         return None
 
-    return np.mean(np.asarray(rows, dtype=np.float32), axis=0).reshape(21, 3)
+    average = np.mean(np.asarray(rows, dtype=np.float32), axis=0)
+    return average.reshape(21, 3)
 
 
 def find_sign_image(label):
-    """Return a local sign photo if one exists for this label."""
     name = normalize_label(label)
+
     for extension in (".png", ".jpg", ".jpeg", ".webp"):
         path = SIGN_IMAGE_DIR / f"{name}{extension}"
         if path.exists():
             return path
+
     return None
 
 
-def reference_panel(label, pose, height):
-    width = 330
-    panel = np.zeros((height, width, 3), dtype=np.uint8)
+def draw_photo_guide(panel, label, image_path):
+    photo = cv2.imread(str(image_path))
+    if photo is None:
+        return False
 
-    image_path = find_sign_image(label)
-    if image_path is not None:
-        photo = cv2.imread(str(image_path))
-        if photo is not None:
-            cv2.putText(panel, "PHOTO GUIDE", (20, 35),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(panel, label.replace("_", " "), (20, 72),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    height, width = panel.shape[:2]
 
-            max_w = width - 30
-            max_h = max(height - 135, 80)
-            ph, pw = photo.shape[:2]
-            scale = min(max_w / pw, max_h / ph)
-            new_w = max(1, int(pw * scale))
-            new_h = max(1, int(ph * scale))
-            resized = cv2.resize(photo, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    cv2.putText(
+        panel,
+        "How to make this sign",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        (255, 255, 255),
+        2,
+    )
+    cv2.putText(
+        panel,
+        pretty_label(label),
+        (20, 72),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (0, 255, 255),
+        2,
+    )
 
-            x = (width - new_w) // 2
-            y = 90 + max(0, (max_h - new_h) // 2)
-            panel[y:y + new_h, x:x + new_w] = resized
+    max_width = width - 30
+    max_height = max(height - 135, 80)
+    photo_height, photo_width = photo.shape[:2]
 
-            cv2.putText(panel, "Copy the photo", (20, height - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-            return panel
+    scale = min(max_width / photo_width, max_height / photo_height)
+    new_width = max(1, int(photo_width * scale))
+    new_height = max(1, int(photo_height * scale))
 
-    cv2.putText(panel, "REFERENCE", (20, 35),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-    cv2.putText(panel, label.replace("_", " "), (20, 72),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    photo = cv2.resize(
+        photo,
+        (new_width, new_height),
+        interpolation=cv2.INTER_AREA,
+    )
+
+    x = (width - new_width) // 2
+    y = 90 + max(0, (max_height - new_height) // 2)
+    panel[y:y + new_height, x:x + new_width] = photo
+
+    cv2.putText(
+        panel,
+        "Try to copy this hand shape",
+        (20, height - 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (255, 255, 255),
+        1,
+    )
+
+    return True
+
+
+def draw_pose_guide(panel, label, pose):
+    height, width = panel.shape[:2]
+
+    cv2.putText(
+        panel,
+        "Practice guide",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.75,
+        (255, 255, 255),
+        2,
+    )
+    cv2.putText(
+        panel,
+        pretty_label(label),
+        (20, 72),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        (0, 255, 255),
+        2,
+    )
 
     if pose is None:
-        cv2.putText(panel, "No photo/reference", (20, 140),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-        return panel
+        cv2.putText(
+            panel,
+            "No photo or reference available",
+            (20, 140),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (0, 0, 255),
+            1,
+        )
+        return
 
     points = pose[:, :2]
     extent = max(float(np.max(np.abs(points))), 1e-6)
-    usable_h = max(height - 160, 120)
-    scale = min(width - 70, usable_h) * 0.48 / extent
-    cx, cy = width // 2, 110 + usable_h // 2
+    usable_height = max(height - 160, 120)
+    scale = min(width - 70, usable_height) * 0.48 / extent
 
-    pts = [(int(cx + x * scale), int(cy + y * scale)) for x, y in points]
+    center_x = width // 2
+    center_y = 110 + usable_height // 2
 
-    for a, b in HAND_CONNECTIONS:
-        cv2.line(panel, pts[a], pts[b], (255, 255, 255), 3)
-    for x, y in pts:
-        cv2.circle(panel, (x, y), 6, (0, 255, 0), -1)
+    pixel_points = [
+        (int(center_x + x * scale), int(center_y + y * scale))
+        for x, y in points
+    ]
 
-    cv2.putText(panel, "Copy this hand shape", (20, height - 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+    for start, end in HAND_CONNECTIONS:
+        cv2.line(panel, pixel_points[start], pixel_points[end], (255, 255, 255), 3)
+
+    for point in pixel_points:
+        cv2.circle(panel, point, 6, (0, 255, 0), -1)
+
+    cv2.putText(
+        panel,
+        "Match your hand to this guide",
+        (20, height - 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.46,
+        (255, 255, 255),
+        1,
+    )
+
+
+def reference_panel(label, pose, height):
+    panel = np.zeros((height, 330, 3), dtype=np.uint8)
+    image_path = find_sign_image(label)
+
+    if image_path and draw_photo_guide(panel, label, image_path):
+        return panel
+
+    draw_pose_guide(panel, label, pose)
     return panel
 
 
 def pose_similarity(features, reference):
     if reference is None:
         return None
+
     current = np.asarray(features, dtype=np.float32).reshape(21, 3)
-    distance = float(np.mean(
-        np.linalg.norm(current[:, :2] - reference[:, :2], axis=1)
-    ))
+    distance = float(
+        np.mean(
+            np.linalg.norm(
+                current[:, :2] - reference[:, :2],
+                axis=1,
+            )
+        )
+    )
+
     return max(0.0, min(100.0, 100.0 * (1.0 - distance / 0.45)))
+
+
+def practice_feedback(similarity):
+    if similarity is None:
+        return "Show your hand clearly"
+    if similarity >= 90:
+        return "Excellent match!"
+    if similarity >= 75:
+        return "Very close - small adjustment"
+    if similarity >= 55:
+        return "Good try - adjust your fingers a little"
+    return "Keep going - match the guide more closely"
 
 
 def practice_sign(model, target):
     target = normalize_label(target)
+
     if target not in trained_labels(model):
         return False
 
     reference = load_reference_pose(target)
     landmarker = create_landmarker()
-    cap = cv2.VideoCapture(0)
+    camera = cv2.VideoCapture(0)
+    window_name = "Signify AI - Learn"
 
-    if not cap.isOpened():
+    if not camera.isOpened():
         landmarker.close()
         print("Could not open webcam.")
         return False
+
+    open_fullscreen(window_name)
 
     history = deque(maxlen=8)
     wrist_history = deque(maxlen=6)
@@ -194,16 +334,12 @@ def practice_sign(model, target):
 
     try:
         while True:
-            ok, frame = cap.read()
+            ok, frame = camera.read()
             if not ok:
                 break
 
             frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            result = landmarker.detect_for_video(
-                image, int(time.monotonic() * 1000)
-            )
+            result = detect_hand(landmarker, frame)
 
             label = "No hand"
             confidence = 0.0
@@ -217,17 +353,20 @@ def practice_sign(model, target):
                 wrist_history.append((hand[0].x, hand[0].y))
                 motion = wrist_motion_score(wrist_history)
 
-                raw, confidence, features = predict_hand(model, hand)
+                raw_label, confidence, features = predict_hand(model, hand)
                 similarity = pose_similarity(features, reference)
 
                 if confidence >= CONFIDENCE_THRESHOLD:
-                    history.append(raw)
-                    label = smooth_prediction(history) or raw
+                    history.append(raw_label)
+                    label = smooth_prediction(history) or raw_label
                 else:
                     history.clear()
                     label = "Not sure"
 
-                if normalize_label(label) == target and confidence >= CONFIDENCE_THRESHOLD:
+                if (
+                    normalize_label(label) == target
+                    and confidence >= CONFIDENCE_THRESHOLD
+                ):
                     correct_frames += 1
                 else:
                     correct_frames = 0
@@ -236,46 +375,86 @@ def practice_sign(model, target):
                 wrist_history.clear()
                 correct_frames = 0
 
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], 135), (0, 0, 0), -1)
-            cv2.putText(frame, f"Learn: {target.replace('_', ' ')}", (15, 32),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.78, (255, 255, 255), 2)
-            cv2.putText(frame, f"AI sees: {label}", (15, 67),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.68, (0, 255, 255), 2)
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], 145), (0, 0, 0), -1)
+
+            cv2.putText(
+                frame,
+                f"Let's learn: {pretty_label(target)}",
+                (15, 32),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.78,
+                (255, 255, 255),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"I can see: {pretty_label(label)}",
+                (15, 67),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.68,
+                (0, 255, 255),
+                2,
+            )
 
             if similarity is not None:
-                cv2.putText(frame, f"Pose similarity: {similarity:.0f}%", (15, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+                cv2.putText(
+                    frame,
+                    f"Match: {similarity:.0f}%",
+                    (15, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.60,
+                    (255, 255, 255),
+                    2,
+                )
 
-            motion_text = (
-                "Movement detected"
-                if motion >= WAVE_MOTION_THRESHOLD
-                else "Hand mostly still"
-            )
-            cv2.putText(frame, motion_text, (15, 126),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (200, 200, 200), 1)
+            feedback = practice_feedback(similarity)
+            if motion >= WAVE_MOTION_THRESHOLD:
+                feedback += "  |  Movement detected"
 
-            combined = np.hstack([
+            cv2.putText(
                 frame,
-                reference_panel(target, reference, frame.shape[0])
-            ])
+                feedback,
+                (15, 130),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (200, 200, 200),
+                1,
+            )
+
+            combined = np.hstack(
+                [frame, reference_panel(target, reference, frame.shape[0])]
+            )
 
             if correct_frames >= HOLD_FRAMES:
-                cv2.rectangle(combined, (0, combined.shape[0] - 70),
-                              (combined.shape[1], combined.shape[0]),
-                              (0, 0, 0), -1)
-                cv2.putText(combined, "CORRECT! Great job!",
-                            (20, combined.shape[0] - 24),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
-                cv2.imshow("Signify AI - Learn", combined)
+                cv2.rectangle(
+                    combined,
+                    (0, combined.shape[0] - 70),
+                    (combined.shape[1], combined.shape[0]),
+                    (0, 0, 0),
+                    -1,
+                )
+                cv2.putText(
+                    combined,
+                    "That's right! Great job!",
+                    (20, combined.shape[0] - 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 0),
+                    3,
+                )
+                cv2.imshow(window_name, combined)
                 cv2.waitKey(1200)
                 return True
 
-            cv2.imshow("Signify AI - Learn", combined)
-            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+            cv2.imshow(window_name, combined)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
                 break
+
     finally:
         landmarker.close()
-        cap.release()
+        camera.release()
         cv2.destroyAllWindows()
 
     return False
@@ -285,7 +464,7 @@ def learn_mode(model):
     labels = trained_labels(model)
 
     print("\n=== LEARN SIGN LANGUAGE ===")
-    print("Type a trained sign/letter, or type a word to fingerspell it.")
+    print("Enter a trained sign, letter or word.")
 
     text = input("\nWhat do you want to learn? > ").strip()
     if not text:
@@ -298,75 +477,110 @@ def learn_mode(model):
         input("\nPress Enter to return...")
         return
 
-    letters = [c for c in text.upper() if c.isalpha()]
-    missing = sorted({c for c in letters if c not in labels})
+    letters = [char for char in text.upper() if char.isalpha()]
+    missing = sorted({letter for letter in letters if letter not in labels})
 
     if not letters:
-        print("Please enter a word.")
+        print("Please enter a word or letter.")
     elif missing:
-        print("\nThe whole word is not trained.")
-        print("Missing trained letters:", ", ".join(missing))
-        print("\nTrain the whole word with:")
+        print("\nThat whole sign is not trained yet.")
+        print("Missing letters:", ", ".join(missing))
+        print("\nYou can train the whole word with:")
         print(f'  python collect_data.py "{whole}"')
-        print("or train the missing letters, then run python train_model.py.")
+        print("or train the missing letters and run python train_model.py again.")
     else:
         print("\nFingerspelling:", " -> ".join(letters))
         input("Press Enter to start...")
-        for i, letter in enumerate(letters, 1):
-            print(f"\nLetter {i}/{len(letters)}: {letter}")
+
+        for number, letter in enumerate(letters, 1):
+            print(f"\nLetter {number}/{len(letters)}: {letter}")
             if not practice_sign(model, letter):
                 break
 
     input("\nPress Enter to return...")
 
 
-def test_question(model, landmarker, cap, target, number, total):
+# -----------------------------
+# Test mode
+# -----------------------------
+
+def test_question(model, landmarker, camera, target, number, total, window_name):
     target = normalize_label(target)
     correct_frames = 0
     started = time.monotonic()
-    limit = 20
+    time_limit = 20
 
     while True:
-        ok, frame = cap.read()
+        ok, frame = camera.read()
         if not ok:
             return "quit"
 
         frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        result = landmarker.detect_for_video(
-            image, int(time.monotonic() * 1000)
-        )
+        result = detect_hand(landmarker, frame)
 
         if result.hand_landmarks:
             hand = result.hand_landmarks[0]
             draw_hand(frame, hand)
+
             predicted, confidence, _ = predict_hand(model, hand)
-            if normalize_label(predicted) == target and confidence >= CONFIDENCE_THRESHOLD:
+
+            if (
+                normalize_label(predicted) == target
+                and confidence >= CONFIDENCE_THRESHOLD
+            ):
                 correct_frames += 1
             else:
                 correct_frames = 0
         else:
             correct_frames = 0
 
-        remaining = max(0, int(limit - (time.monotonic() - started)))
+        elapsed = time.monotonic() - started
+        remaining = max(0, int(time_limit - elapsed))
 
         cv2.rectangle(frame, (0, 0), (frame.shape[1], 115), (0, 0, 0), -1)
-        cv2.putText(frame, f"Question {number}/{total}", (15, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (200, 200, 200), 2)
-        cv2.putText(frame, f"MAKE: {target.replace('_', ' ')}", (15, 65),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
-        cv2.putText(frame, f"Time: {remaining}s   S=skip   Q=quit", (15, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+        cv2.putText(
+            frame,
+            f"Question {number}/{total}",
+            (15, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (200, 200, 200),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"Show me: {pretty_label(target)}",
+            (15, 65),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.85,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"Time left: {remaining}s   S=skip   Q=quit",
+            (15, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            1,
+        )
 
         if correct_frames >= HOLD_FRAMES:
-            cv2.putText(frame, "CORRECT! +1", (20, frame.shape[0] - 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
-            cv2.imshow("Signify AI - Test", frame)
+            cv2.putText(
+                frame,
+                "Correct! Well done!",
+                (20, frame.shape[0] - 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                3,
+            )
+            cv2.imshow(window_name, frame)
             cv2.waitKey(900)
             return "correct"
 
-        cv2.imshow("Signify AI - Test", frame)
+        cv2.imshow(window_name, frame)
         key = cv2.waitKey(1) & 0xFF
 
         if key in (ord("q"), 27):
@@ -384,31 +598,36 @@ def custom_test_targets(text, model):
     if whole in labels:
         return [labels[whole]], []
 
-    pieces = [p for p in text.replace(",", " ").split() if p]
+    pieces = [piece for piece in text.replace(",", " ").split() if piece]
+
     if len(pieces) > 1:
         targets = []
         missing = []
+
         for piece in pieces:
             key = normalize_label(piece)
             if key in labels:
                 targets.append(labels[key])
             else:
                 missing.append(piece.upper())
+
         return targets, missing
 
-    letters = [c for c in text.upper() if c.isalpha()]
+    letters = [char for char in text.upper() if char.isalpha()]
     targets = []
     missing = []
+
     for letter in letters:
         if letter in labels:
             targets.append(labels[letter])
         else:
             missing.append(letter)
+
     return targets, sorted(set(missing))
 
 
 def test_mode(model):
-    labels = [str(x) for x in model.classes_]
+    labels = [str(label) for label in model.classes_]
 
     if len(labels) < 2:
         print("\nTrain at least two signs first.")
@@ -417,100 +636,125 @@ def test_mode(model):
 
     print("\n=== TAKE A TEST ===")
     print("1. Random test")
-    print("2. Test a specific letter/word")
+    print("2. Test a specific letter or word")
+
     mode = input("\nChoose > ").strip().lower()
 
     if mode in {"2", "custom", "specific"}:
         text = input("Enter A, ABC, HELLO, A B C, etc. > ").strip()
         targets, missing = custom_test_targets(text, model)
+
         if missing:
-            print("\nThese signs/letters are not trained:", ", ".join(missing))
-            print("Train them first and run python train_model.py again.")
+            print("\nThese signs are not trained:", ", ".join(missing))
             input("\nPress Enter to return...")
             return
+
         if not targets:
             print("No valid trained signs found.")
             input("\nPress Enter to return...")
             return
     else:
         raw = input("How many random questions? [5] > ").strip()
+
         try:
             total = int(raw) if raw else 5
         except ValueError:
             total = 5
+
         total = max(1, min(total, 20))
         targets = [random.choice(labels) for _ in range(total)]
 
     landmarker = create_landmarker()
-    cap = cv2.VideoCapture(0)
+    camera = cv2.VideoCapture(0)
+    window_name = "Signify AI - Test"
 
-    if not cap.isOpened():
+    if not camera.isOpened():
         landmarker.close()
         print("Could not open webcam.")
         return
 
+    open_fullscreen(window_name)
+
     score = 0
     attempted = 0
-    total = len(targets)
 
     try:
         for number, target in enumerate(targets, 1):
-            result = test_question(model, landmarker, cap, target, number, total)
+            result = test_question(
+                model,
+                landmarker,
+                camera,
+                target,
+                number,
+                len(targets),
+                window_name,
+            )
+
             if result == "quit":
                 break
+
             attempted += 1
+
             if result == "correct":
                 score += 1
+
     finally:
         landmarker.close()
-        cap.release()
+        camera.release()
         cv2.destroyAllWindows()
 
     print("\n=== TEST RESULT ===")
-    if attempted:
-        percentage = score / attempted * 100
-        print(f"Score: {score}/{attempted} ({percentage:.0f}%)")
-        if percentage >= 80:
-            print("Excellent!")
-        elif percentage >= 60:
-            print("Good job. Keep practicing!")
-        else:
-            print("Use Learn Mode and try again.")
-    else:
+
+    if not attempted:
         print("No questions completed.")
+        input("\nPress Enter to return...")
+        return
+
+    percentage = score / attempted * 100
+    print(f"Score: {score}/{attempted} ({percentage:.0f}%)")
+
+    if percentage >= 80:
+        print("Excellent!")
+    elif percentage >= 60:
+        print("Good job. Keep practicing!")
+    else:
+        print("Try Learn Mode once more and then test yourself again.")
 
     input("\nPress Enter to return...")
 
 
+# -----------------------------
+# Identifier mode
+# -----------------------------
+
 def identify_mode(model):
     landmarker = create_landmarker()
-    cap = cv2.VideoCapture(0)
+    camera = cv2.VideoCapture(0)
+    window_name = "Signify AI - Identifier"
 
-    if not cap.isOpened():
+    if not camera.isOpened():
         landmarker.close()
         print("Could not open webcam.")
         return
 
+    open_fullscreen(window_name)
+
     history = deque(maxlen=8)
     wrist_history = deque(maxlen=6)
     last_label = None
-    detected_sequence = []
+    sequence = []
 
     print("\nIdentify mode started.")
-    print("Q = return   SPACE = add detected sign   C = clear sequence")
+    print("Q = return   SPACE = add sign   C = clear")
 
     try:
         while True:
-            ok, frame = cap.read()
+            ok, frame = camera.read()
             if not ok:
                 break
 
             frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            result = landmarker.detect_for_video(
-                image, int(time.monotonic() * 1000)
-            )
+            result = detect_hand(landmarker, frame)
 
             label = "No hand"
             confidence = 0.0
@@ -523,10 +767,11 @@ def identify_mode(model):
                 wrist_history.append((hand[0].x, hand[0].y))
                 motion = wrist_motion_score(wrist_history)
 
-                raw, confidence, _ = predict_hand(model, hand)
+                raw_label, confidence, _ = predict_hand(model, hand)
+
                 if confidence >= CONFIDENCE_THRESHOLD:
-                    history.append(raw)
-                    label = smooth_prediction(history) or raw
+                    history.append(raw_label)
+                    label = smooth_prediction(history) or raw_label
                     last_label = label
                 else:
                     history.clear()
@@ -538,47 +783,102 @@ def identify_mode(model):
                 last_label = None
 
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 145), (0, 0, 0), -1)
-            cv2.putText(frame, "SIGNIFY AI - IDENTIFIER", (15, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2)
-            cv2.putText(frame, f"Sign: {label}", (15, 68),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 255, 0), 2)
-            cv2.putText(frame, f"Confidence: {confidence * 100:.1f}%", (15, 102),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
 
-            motion_text = (
+            cv2.putText(
+                frame,
+                "Signify AI - Live Sign Reader",
+                (15, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.72,
+                (255, 255, 255),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"I can see: {pretty_label(label)}",
+                (15, 68),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.90,
+                (0, 255, 0),
+                2,
+            )
+            cv2.putText(
+                frame,
+                f"Confidence: {confidence * 100:.1f}%",
+                (15, 102),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                (255, 255, 255),
+                2,
+            )
+
+            movement_text = (
                 "Movement detected"
                 if motion >= WAVE_MOTION_THRESHOLD
-                else "Hand mostly still"
+                else "Hold your hand clearly"
             )
-            cv2.putText(frame, motion_text, (15, 130),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 1)
 
-            sequence_text = " ".join(detected_sequence[-8:]) or "-"
-            cv2.rectangle(frame, (0, frame.shape[0] - 75),
-                          (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
-            cv2.putText(frame, f"Sequence: {sequence_text}", (15, frame.shape[0] - 42),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 1)
-            cv2.putText(frame, "SPACE=add   C=clear   Q=return",
-                        (15, frame.shape[0] - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
+            cv2.putText(
+                frame,
+                movement_text,
+                (15, 130),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (0, 255, 255),
+                1,
+            )
 
-            cv2.imshow("Signify AI - Identifier", frame)
+            sequence_text = " ".join(sequence[-8:]) or "-"
+
+            cv2.rectangle(
+                frame,
+                (0, frame.shape[0] - 75),
+                (frame.shape[1], frame.shape[0]),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.putText(
+                frame,
+                f"Your signs: {sequence_text}",
+                (15, frame.shape[0] - 42),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.58,
+                (255, 255, 255),
+                1,
+            )
+            cv2.putText(
+                frame,
+                "SPACE: add   C: clear   Q: back",
+                (15, frame.shape[0] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (200, 200, 200),
+                1,
+            )
+
+            cv2.imshow(window_name, frame)
             key = cv2.waitKey(1) & 0xFF
 
             if key in (ord("q"), 27):
                 break
+
             if key == ord("c"):
-                detected_sequence.clear()
+                sequence.clear()
+
             if key == 32 and last_label:
-                detected_sequence.append(str(last_label))
+                sequence.append(str(last_label))
                 history.clear()
                 last_label = None
 
     finally:
         landmarker.close()
-        cap.release()
+        camera.release()
         cv2.destroyAllWindows()
 
+
+# -----------------------------
+# Main menu
+# -----------------------------
 
 def main():
     model = load_model()
@@ -586,9 +886,10 @@ def main():
         return
 
     while True:
-        print("\n" + "=" * 56)
-        print("SIGNIFY AI - AI SIGN LANGUAGE HELPER")
-        print("=" * 56)
+        print("\n" + "=" * 48)
+        print("SIGNIFY AI")
+        print("AI Sign Language Helper")
+        print("=" * 48)
         print("1. Learn Sign Language")
         print("2. Take a Test")
         print("3. Identify a Sign")
@@ -605,7 +906,7 @@ def main():
         elif choice in {"q", "quit", "exit", "4"}:
             break
         else:
-            print("Type 1/learn, 2/test, 3/identify, or Q/exit.")
+            print("Choose 1, 2, 3 or Q.")
 
 
 if __name__ == "__main__":
